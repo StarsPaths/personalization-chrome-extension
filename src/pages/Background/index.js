@@ -1,29 +1,50 @@
 // 当前标签页 url
 let currentTab = {};
-let requestBodies = {};
-let requestHeaders = {};
-let apzAdminPortalAuthToken = ''
+let apzAdminPortalAuthToken = {
+  development: {},
+  testing: {},
+  production: {},
+}
+const JUMP_STATUS = {
+  development: true,
+  testing: true,
+  production: true,
+}
+const AUTH_SENDER_ORIGINS = new Map([
+  ['http://localhost:8000', 'development'],
+  ['https://admin.automizely.me', 'testing'],
+  ['https://admin.automizely.org', 'production'],
+]);
+const REDIRECT_URL_ORIGINS = {
+  development: 'http://localhost:9006',
+  testing: 'https://bff-api.automizely.me',
+  production: 'https://bff-api.automizely.org',
+}
 const BLOCKING_URLS = [
+  'http://localhost:9006/personalization/portal/graphql',
+  'https://bff-api.automizely.me/personalization/portal/graphql',
+  'https://bff-api.automizely.org/personalization/portal/graphql',
   'http://localhost:9007/personalization/admin/graphql',
   'https://bff-api.automizely.io/personalization/admin/graphql',
   'https://bff-api.automizely.com/personalization/admin/graphql',
 ];
-const APP_KEYS = []
+
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
   currentTab = tab;
 });
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
-  apzAdminPortalAuthToken = request.authToken;
+  const env = AUTH_SENDER_ORIGINS.get(sender.origin);
+  apzAdminPortalAuthToken[env] = { ...request.authToken, tabUrl: sender.tab.url};
 })
 // 拦截请求体或请求地址，请求体和请求地址不可同时更改，只可改其中之一
 chrome.webRequest.onBeforeRequest.addListener(
   function (details) {
-    requestBodies = details.requestBody;
-    const isProxy = getIsProxy(details.method, details.requestBody);
-    console.log('onBeforeRequest isProxy: ', isProxy);
+    const isProxy = getIsProxy(details);
     if (isProxy) {
       const redirectUrl = getRequestRedirectUrl(details.url);
-      return { redirectUrl: redirectUrl };
+      if (redirectUrl) {
+        return { redirectUrl: redirectUrl };
+      }
     }
     return { cancel: false };
   },
@@ -32,42 +53,73 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 /**
  * 拦截请求头
- * onBeforeSendHeaders 无法执行异步的操作，若是要添加异步的 token 则可能需要在业务测添加
 */
 chrome.webRequest.onBeforeSendHeaders.addListener(
   function (details) {
-    requestHeaders = details.requestHeaders;
-    const isProxy = getIsProxy(details.method, requestBodies);
-    let headers = details.requestHeaders;
-    if (isProxy) {
+    const changed = haveBeenRequestedModified(details.url);
+    if (changed) {
+      const authToken = apzAdminPortalAuthToken[getEnv(details.url)];
+      let headers = details.requestHeaders;
       headers = headers.filter((item) => {
         return item.name !== 'authorization';
       });
       headers.push({
         name: 'authorization',
-        value: `${apzAdminPortalAuthToken?.type} ${apzAdminPortalAuthToken?.token}`,
+        value: `${authToken.type} ${authToken.token}`,
       });
+      return { requestHeaders: headers };
     }
-    return { requestHeaders: headers };
   },
   { urls: BLOCKING_URLS },
   ['blocking', 'requestHeaders']
 );
+chrome.webRequest.onCompleted.addListener(function(details) {
+  console.log('onResponseStarted details: ', details);
+  const env = getEnv(details.url);
+  if (!JUMP_STATUS[env]) {
+    JUMP_STATUS[env] = true
+    const url = apzAdminPortalAuthToken[env].tabUrl;
+    if (url) {
+      chrome.tabs.query({ url }, function (tabs) {
+        if (tabs.length) {
+          chrome.tabs.update(tabs[0].id, { active: true });
+        } else {
+          chrome.tabs.create({ url }, function (newTab) {
+            chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+              if (info.status === 'complete' && tabId === newTab.id) {
+                chrome.tabs.onUpdated.removeListener(listener);
+                chrome.tabs.update(newTab.id, { active: true });
+              }
+            });
+          });
+        }
+      });
+    }
+  }
+
+}, { urls: BLOCKING_URLS });
+// 此处用来排查 header 是否被正确修改了，待开发完成后即可删除
+// chrome.webRequest.onSendHeaders.addListener(
+//   function (details) {
+//     console.log('onSendHeaders: ', details.requestId, details.requestHeaders);
+//   },
+//   { urls: BLOCKING_URLS },
+//   ['requestHeaders']
+// );
 
 /**
  * 拦截条件
  * 1. 从 APZ Admin Portal 来的
  * 2. 发起请求的接口时的 GetWidgetById / UpdateWidgetSetting
- * 3. 有权限的 app key
 */
-function getIsProxy(requestMethod, requestBodies) {
-  const appkey = requestHeaders?.find(
-    (item) => item.name === 'am-app-key'
-  )?.value;
-  const hasPermissionAppKey = APP_KEYS.includes(appkey);
+function getIsProxy(details) {
   const isAPZAdminPortal = getUrlSource();
-  const isIntercepted = getInterceptedGraphql(requestMethod, requestBodies);
-  return isAPZAdminPortal && isIntercepted && !hasPermissionAppKey;
+  const isIntercepted = getInterceptedGraphql(
+    details.url,
+    details.method,
+    details.requestBody
+  );
+  return isAPZAdminPortal && isIntercepted
 }
 
 function getUrlSource() {
@@ -77,16 +129,21 @@ function getUrlSource() {
   return source === 'apz_admin_portal';
 }
 
-function getInterceptedGraphql(requestMethod, requestBodies) {
+function getInterceptedGraphql(requestUrl, requestMethod, requestBodies) {
   if (requestMethod === 'POST' && requestBodies) {
     const decoder = new TextDecoder('utf-8');
     const requestBody = JSON.parse(decoder.decode(requestBodies.raw[0].bytes));
     const isArray = Array.isArray(requestBody);
     if (isArray) {
-      const INTERCEPTED_GRAPHQL_OPERATIONS = ['GetWidgetById', 'UpdateWidgetSetting'];
-      const isIntercepted = INTERCEPTED_GRAPHQL_OPERATIONS.includes(
-        requestBody[0].operationName
-      );
+      console.log('requestUrl', requestUrl);
+      const env = getEnv(requestUrl);
+      const operationName = requestBody[0].operationName.toLowerCase();
+      if (operationName === 'updatewidgetsetting') {
+        JUMP_STATUS[env] = false;
+      }
+      const INTERCEPTED_GRAPHQL_OPERATIONS = ['getwidgetbyid', 'updatewidgetsetting'];
+      const isIntercepted =
+        INTERCEPTED_GRAPHQL_OPERATIONS.includes(operationName);
       return isIntercepted;
     }
     return false;
@@ -95,13 +152,34 @@ function getInterceptedGraphql(requestMethod, requestBodies) {
 }
 
 function getRequestRedirectUrl(requestUrl) {
-  const REDIRECT_URL = new Map([
-    ['http://localhost:9007', 'http://localhost:9006'],
-    ['http://127.0.0.1:9007', 'http://localhost:9006'],
-    ['https://bff-api.automizely.io', 'https://bff-api.automizely.me'],
-    ['https://bff-api.automizely.com', 'https://bff-api.automizely.org'],
+  const REDIRECT_URL_MAP = new Map([
+    ['http://localhost:9007', REDIRECT_URL_ORIGINS.development],
+    ['http://127.0.0.1:9007', REDIRECT_URL_ORIGINS.development],
+    ['https://bff-api.automizely.io', REDIRECT_URL_ORIGINS.testing],
+    ['https://bff-api.automizely.com', REDIRECT_URL_ORIGINS.production],
   ]);
   const url = new URL(requestUrl);
-  const redirectDomain = REDIRECT_URL.get(url.origin);
+  const redirectDomain = REDIRECT_URL_MAP.get(url.origin);
+  if (!redirectDomain) return
   return redirectDomain + '/personalization/portal/graphql';
+}
+
+function haveBeenRequestedModified(requestUrl) {
+  const REDIRECT_ORIGINS = [
+    REDIRECT_URL_ORIGINS.development,
+    REDIRECT_URL_ORIGINS.testing,
+    REDIRECT_URL_ORIGINS.production,
+  ];
+  const url = new URL(requestUrl);
+  return REDIRECT_ORIGINS.includes(url.origin);
+}
+
+function getEnv (requestUrl) {
+  const ENV_MAPS = new Map([
+    [REDIRECT_URL_ORIGINS.development, 'development'],
+    [REDIRECT_URL_ORIGINS.testing, 'testing'],
+    [REDIRECT_URL_ORIGINS.production, 'production'],
+  ])
+  const url = new URL(requestUrl);
+  return ENV_MAPS.get(url.origin);
 }
