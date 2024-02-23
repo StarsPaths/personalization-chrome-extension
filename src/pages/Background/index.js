@@ -1,4 +1,5 @@
 // 当前标签页 url
+const apzProxyExtensionElementId = 'apz_proxy_tempplate_config_extension';
 let currentTab = {};
 let apzAdminPortalAuthToken = {
   development: {},
@@ -74,7 +75,6 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['blocking', 'requestHeaders']
 );
 chrome.webRequest.onCompleted.addListener(function(details) {
-  console.log('onResponseStarted details: ', details);
   const env = getEnv(details.url);
   if (!JUMP_STATUS[env]) {
     JUMP_STATUS[env] = true
@@ -82,7 +82,7 @@ chrome.webRequest.onCompleted.addListener(function(details) {
     if (url) {
       chrome.tabs.query({ url }, function (tabs) {
         if (tabs.length) {
-          chrome.tabs.update(tabs[0].id, { active: true });
+          chrome.tabs.update(tabs[0].id, { active: true,url: tabs[0].url });
         } else {
           chrome.tabs.create({ url }, function (newTab) {
             chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
@@ -98,14 +98,15 @@ chrome.webRequest.onCompleted.addListener(function(details) {
   }
 
 }, { urls: BLOCKING_URLS });
-// 此处用来排查 header 是否被正确修改了，待开发完成后即可删除
-// chrome.webRequest.onSendHeaders.addListener(
-//   function (details) {
-//     console.log('onSendHeaders: ', details.requestId, details.requestHeaders);
-//   },
-//   { urls: BLOCKING_URLS },
-//   ['requestHeaders']
-// );
+
+// 监听扩展被禁用或卸载的事件
+chrome.runtime.onSuspend.addListener(function () {
+  // 删除元素
+  const element = document.getElementById(apzProxyExtensionElementId);
+  if (element) {
+    element.parentNode.removeChild(element);
+  }
+});
 
 /**
  * 拦截条件
@@ -135,7 +136,6 @@ function getInterceptedGraphql(requestUrl, requestMethod, requestBodies) {
     const requestBody = JSON.parse(decoder.decode(requestBodies.raw[0].bytes));
     const isArray = Array.isArray(requestBody);
     if (isArray) {
-      console.log('requestUrl', requestUrl);
       const env = getEnv(requestUrl);
       const operationName = requestBody[0].operationName.toLowerCase();
       if (operationName === 'updatewidgetsetting') {

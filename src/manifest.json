@@ -14,18 +14,18 @@
   ],
   "background": { "scripts": ["background.bundle.js"] },
   "browser_action": {
-    "default_popup": "popup.html",
+    "default_popup": "popup.html", 
     "default_icon": "icon-34.png"
   },
   "content_scripts": [
     {
       "matches": [
         "http://localhost:3343/*",
-        "http://127.0.0.1:3343/*",
-        "http://localhost:8000/*",
-        "http://127.0.0.1:8000/*",
         "https://personalization.automizely.io/*",
-        "https://personalization.automizely.com/*"
+        "https://personalization.automizely.com/*",
+        "http://localhost:8000/*",
+        "https://admin.automizely.me/*",
+        "https://admin.automizely.org/*"
       ],
       "js": ["contentScript.bundle.js"]
     }
