@@ -11,30 +11,40 @@ const JUMP_STATUS = {
   testing: true,
   production: true,
 }
-const AUTH_SENDER_ORIGINS = new Map([
+const AUTH_SENDER_ORIGIN_MAP_ENV = new Map([
   ['http://localhost:8000', 'development'],
   ['https://admin.automizely.me', 'testing'],
   ['https://admin.automizely.org', 'production'],
 ]);
+const INITIATORS = {
+  development: 'http://localhost:3343',
+  testing: 'https://personalization.automizely.io',
+  production: 'https://personalization.automizely.com',
+};
+const INITIATOR_REQUEST_URL_ORIGINS = {
+  development: 'http://localhost:9007',
+  testing: 'https://bff-api.automizely.io',
+  production: 'https://bff-api.automizely.com',
+};
 const REDIRECT_URL_ORIGINS = {
   development: 'http://localhost:9006',
   testing: 'https://bff-api.automizely.me',
   production: 'https://bff-api.automizely.org',
 }
 const BLOCKING_URLS = [
-  'http://localhost:9006/personalization/portal/graphql',
-  'https://bff-api.automizely.me/personalization/portal/graphql',
-  'https://bff-api.automizely.org/personalization/portal/graphql',
-  'http://localhost:9007/personalization/admin/graphql',
-  'https://bff-api.automizely.io/personalization/admin/graphql',
-  'https://bff-api.automizely.com/personalization/admin/graphql',
+  `${REDIRECT_URL_ORIGINS.development}/personalization/portal/graphql`,
+  `${REDIRECT_URL_ORIGINS.testing}/personalization/portal/graphql`,
+  `${REDIRECT_URL_ORIGINS.production}/personalization/portal/graphql`,
+  `${INITIATOR_REQUEST_URL_ORIGINS.development}/personalization/admin/graphql`,
+  `${INITIATOR_REQUEST_URL_ORIGINS.testing}/personalization/admin/graphql`,
+  `${INITIATOR_REQUEST_URL_ORIGINS.production}/personalization/admin/graphql`,
 ];
 
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
   currentTab = tab;
 });
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
-  const env = AUTH_SENDER_ORIGINS.get(sender.origin);
+  const env = AUTH_SENDER_ORIGIN_MAP_ENV.get(sender.origin);
   apzAdminPortalAuthToken[env] = { ...request.authToken, tabUrl: sender.tab.url};
 })
 // 拦截请求体或请求地址，请求体和请求地址不可同时更改，只可改其中之一
@@ -57,7 +67,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 */
 chrome.webRequest.onBeforeSendHeaders.addListener(
   function (details) {
-    const changed = haveBeenRequestedModified(details.url);
+    const changed = haveBeenRequestedModified(details.initiator, details.url);
     if (changed) {
       const authToken = apzAdminPortalAuthToken[getEnv(details.url)];
       let headers = details.requestHeaders;
@@ -153,10 +163,12 @@ function getInterceptedGraphql(requestUrl, requestMethod, requestBodies) {
 
 function getRequestRedirectUrl(requestUrl) {
   const REDIRECT_URL_MAP = new Map([
-    ['http://localhost:9007', REDIRECT_URL_ORIGINS.development],
-    ['http://127.0.0.1:9007', REDIRECT_URL_ORIGINS.development],
-    ['https://bff-api.automizely.io', REDIRECT_URL_ORIGINS.testing],
-    ['https://bff-api.automizely.com', REDIRECT_URL_ORIGINS.production],
+    [
+      INITIATOR_REQUEST_URL_ORIGINS.development,
+      REDIRECT_URL_ORIGINS.development,
+    ],
+    [INITIATOR_REQUEST_URL_ORIGINS.testing, REDIRECT_URL_ORIGINS.testing],
+    [INITIATOR_REQUEST_URL_ORIGINS.production, REDIRECT_URL_ORIGINS.production],
   ]);
   const url = new URL(requestUrl);
   const redirectDomain = REDIRECT_URL_MAP.get(url.origin);
@@ -164,14 +176,20 @@ function getRequestRedirectUrl(requestUrl) {
   return redirectDomain + '/personalization/portal/graphql';
 }
 
-function haveBeenRequestedModified(requestUrl) {
+function haveBeenRequestedModified(initiatorUrl, requestUrl) {
+  const INITIATOR = [
+    INITIATORS.development,
+    INITIATORS.testing,
+    INITIATORS.production,
+  ];
   const REDIRECT_ORIGINS = [
     REDIRECT_URL_ORIGINS.development,
     REDIRECT_URL_ORIGINS.testing,
     REDIRECT_URL_ORIGINS.production,
   ];
+  const isInitiator = INITIATOR.includes(initiatorUrl);
   const url = new URL(requestUrl);
-  return REDIRECT_ORIGINS.includes(url.origin);
+  return isInitiator && REDIRECT_ORIGINS.includes(url.origin);
 }
 
 function getEnv (requestUrl) {
