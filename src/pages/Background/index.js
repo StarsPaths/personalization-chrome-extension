@@ -1,5 +1,5 @@
 // 当前标签页 url
-const apzProxyExtensionElementId = 'apz_proxy_tempplate_config_extension';
+const apzProxyExtensionElementId = 'apz_proxy_template_config_extension';
 let currentTab = {};
 let apzAdminPortalAuthToken = {
   development: {},

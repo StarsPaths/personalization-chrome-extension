@@ -4,7 +4,7 @@ console.log('Content script works!');
 console.log('Must reload extension for modifications to take effect.');
 
 printLine("Using the 'printLine' function from the Print Module");
-const apzProxyExtensionElementId = 'apz_proxy_tempplate_config_extension';
+const apzProxyExtensionElementId = 'apz_proxy_template_config_extension';
 
 /**
  * 用来监听 admin portal 页面发送过来的 token，此 token 用于接口代理时使用
