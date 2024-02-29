@@ -1,7 +1,11 @@
 // 当前标签页 url
 const apzProxyExtensionElementId = 'apz_proxy_template_config_extension';
-let currentTab = {};
-let apzAdminPortalAuthToken = {
+const currentTab = {
+  development: {},
+  testing: {},
+  production: {},
+};
+const apzAdminPortalAuthToken = {
   development: {},
   testing: {},
   production: {},
@@ -11,11 +15,11 @@ const JUMP_STATUS = {
   testing: true,
   production: true,
 }
-const AUTH_SENDER_ORIGIN_MAP_ENV = new Map([
-  ['http://localhost:8000', 'development'],
-  ['https://admin.automizely.me', 'testing'],
-  ['https://admin.automizely.org', 'production'],
-]);
+const ADMIN_PORTAL_URL_ORIGINS = {
+  development: 'http://localhost:8000',
+  testing: 'https://admin.automizely.me',
+  production: 'https://admin.automizely.org',
+}
 const INITIATORS = {
   development: 'http://localhost:3343',
   testing: 'https://personalization.automizely.io',
@@ -26,11 +30,21 @@ const INITIATOR_REQUEST_URL_ORIGINS = {
   testing: 'https://bff-api.automizely.io',
   production: 'https://bff-api.automizely.com',
 };
+const INITIATORS_ORIGIN_MAP_ENV = new Map([
+  [INITIATORS.development, 'development'],
+  [INITIATORS.testing, 'testing'],
+  [INITIATORS.production, 'production'],
+]);
 const REDIRECT_URL_ORIGINS = {
   development: 'http://localhost:9006',
   testing: 'https://bff-api.automizely.me',
   production: 'https://bff-api.automizely.org',
 }
+const AUTH_SENDER_ORIGIN_MAP_ENV = new Map([
+  [ADMIN_PORTAL_URL_ORIGINS.development, 'development'],
+  [ADMIN_PORTAL_URL_ORIGINS.testing, 'testing'],
+  [ADMIN_PORTAL_URL_ORIGINS.production, 'production'],
+]);
 const BLOCKING_URLS = [
   `${REDIRECT_URL_ORIGINS.development}/personalization/portal/graphql`,
   `${REDIRECT_URL_ORIGINS.testing}/personalization/portal/graphql`,
@@ -41,8 +55,24 @@ const BLOCKING_URLS = [
 ];
 
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
-  currentTab = tab;
+  const url = new URL(tab?.url);
+  const env = INITIATORS_ORIGIN_MAP_ENV.get(url.origin);
+  if (env) {
+    currentTab[env] = tab;
+  }
 });
+
+chrome.tabs.onActivated.addListener(function (activeInfo) {
+  chrome.tabs.get(activeInfo.tabId, function (tab) {
+    if (tab?.url) {
+      const url = new URL(tab.url);
+      const env = INITIATORS_ORIGIN_MAP_ENV.get(url.origin);
+      if (env) {
+        currentTab[env] = tab;
+      }
+    }
+  })
+})
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   const env = AUTH_SENDER_ORIGIN_MAP_ENV.get(sender.origin);
   apzAdminPortalAuthToken[env] = { ...request.authToken, tabUrl: sender.tab.url};
@@ -85,28 +115,29 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['blocking', 'requestHeaders']
 );
 chrome.webRequest.onCompleted.addListener(function(details) {
-  const env = getEnv(details.url);
-  if (!JUMP_STATUS[env]) {
-    JUMP_STATUS[env] = true
-    const url = apzAdminPortalAuthToken[env].tabUrl;
-    if (url) {
-      chrome.tabs.query({ url }, function (tabs) {
-        if (tabs.length) {
-          chrome.tabs.update(tabs[0].id, { active: true,url: tabs[0].url });
-        } else {
-          chrome.tabs.create({ url }, function (newTab) {
-            chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-              if (info.status === 'complete' && tabId === newTab.id) {
-                chrome.tabs.onUpdated.removeListener(listener);
-                chrome.tabs.update(newTab.id, { active: true });
-              }
+  if (details.statusCode === 200) {
+    const env = getEnv(details.url);
+    if (env !== undefined && !JUMP_STATUS[env]) {
+      JUMP_STATUS[env] = true
+      const url = apzAdminPortalAuthToken[env].tabUrl;
+      if (url) {
+        chrome.tabs.query({ url }, function (tabs) {
+          if (tabs.length) {
+            chrome.tabs.update(tabs[0].id, { active: true,url: tabs[0].url });
+          } else {
+            chrome.tabs.create({ url }, function (newTab) {
+              chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
+                if (info.status === 'complete' && tabId === newTab.id) {
+                  chrome.tabs.onUpdated.removeListener(listener);
+                  chrome.tabs.update(newTab.id, { active: true });
+                }
+              });
             });
-          });
-        }
-      });
+          }
+        });
+      }
     }
   }
-
 }, { urls: BLOCKING_URLS });
 
 // 监听扩展被禁用或卸载的事件
@@ -124,7 +155,9 @@ chrome.runtime.onSuspend.addListener(function () {
  * 2. 发起请求的接口时的 GetWidgetById / UpdateWidgetSetting
 */
 function getIsProxy(details) {
-  const isAPZAdminPortal = getUrlSource();
+  const env = getEnv(details.url);
+  if(!env) return false
+  const isAPZAdminPortal = getUrlSource(env);
   const isIntercepted = getInterceptedGraphql(
     details.url,
     details.method,
@@ -133,8 +166,12 @@ function getIsProxy(details) {
   return isAPZAdminPortal && isIntercepted
 }
 
-function getUrlSource() {
-  const url = new URL(currentTab.url);
+function getUrlSource(env) {
+  const currentUrl = currentTab[env]?.url;
+  if (!currentUrl) {
+    return false;
+  }
+  const url = new URL(currentUrl);
   const searchParams = new URLSearchParams(url.search);
   const source = searchParams.get('source');
   return source === 'apz_admin_portal';
@@ -193,11 +230,16 @@ function haveBeenRequestedModified(initiatorUrl, requestUrl) {
 }
 
 function getEnv (requestUrl) {
-  const ENV_MAPS = new Map([
+  const PROXY_ENV_MAPS = new Map([
     [REDIRECT_URL_ORIGINS.development, 'development'],
     [REDIRECT_URL_ORIGINS.testing, 'testing'],
     [REDIRECT_URL_ORIGINS.production, 'production'],
   ])
+  const INITIATOR_ENV_MAPS = new Map([
+    [INITIATOR_REQUEST_URL_ORIGINS.development, 'development'],
+    [INITIATOR_REQUEST_URL_ORIGINS.testing, 'testing'],
+    [INITIATOR_REQUEST_URL_ORIGINS.production, 'production'],
+  ]);
   const url = new URL(requestUrl);
-  return ENV_MAPS.get(url.origin);
+  return PROXY_ENV_MAPS.get(url.origin) || INITIATOR_ENV_MAPS.get(url.origin);
 }
